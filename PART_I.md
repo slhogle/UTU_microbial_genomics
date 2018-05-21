@@ -65,7 +65,7 @@ Create the following text file in `UTU_microbial_genomics` directory and name it
 #SBATCH -o blastANI.log
 #SBATCH --time 0-00:30:00
 #SBATCH -p serial
-#SBATCH --mem 0.5GB
+#SBATCH --mem 1GB
 #SBATCH -n 1
 
 module load biokit
