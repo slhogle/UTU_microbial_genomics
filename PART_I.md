@@ -10,7 +10,7 @@ A patient was admitted to a local hospital with recurrent inflammation and pain 
 2. contains other genetic variants (single nucleotide polymorphisms, insertions/deletions) relevant to its virulence
 
 ## ANTIBIOTIC RESISTANCE GENES
-On your computer (not the Taito cluster) go to this ftp directory - ftp://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/001/442/595/GCF_001442595.1_ASM144259v1 and download the amino acid fasta file (most web browsers will download after clicking the link, but you may also have to right-click "Save Link as...").
+On your computer (not the Taito cluster) go to this ftp directory - ftp://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/001/442/595/GCF_001442595.1_ASM144259v1 and download the amino acid fasta file (most web browsers will download after clicking the link, but you may also have to right-click "Save Link as..."). NOTE: If you are using Microsoft Windows on the UTU public computers then you are not allowed to decompress gzipped files :anguished:. The protein sequences [are here](https://github.com/slhogle/UTU_microbial_genomics/blob/master/GCF_001442595.1_ASM144259v1_protein.faa) for the convenience of Windows users.
 
 Although this is already a full assembled and annotated genome we'll pretend that we've just assembled it without any annotations or predictions :) The first step we'll take is to predict the presence of known antibiotic resistance genes using the [CARD server](https://academic.oup.com/nar/article/45/D1/D566/2333912). Because the MEEI01 strain displayed resistance to multiple types of antibiotics we can probably assume it is carrying at least a few different antibiotic resistance genes. 
 
