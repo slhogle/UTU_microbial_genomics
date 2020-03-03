@@ -1,0 +1,1623 @@
+# -*- org-hierarchical-todo-statistics: nil; org-latex-with-hyperref: nil; org-export-allow-bind-keywords: t -*-
+#+TITLE: Project siderophores
+#+AUTHOR: Thomas Hackl
+#+DATE: 10/02/17
+
+* Meta
+* Research Log
+Goal: Relate abundance to siderophore transporters in Pro/Syn to overall
+abundance of Pro/Syn in samples.
+
+Problem: Shane observers (not surprisingly) a large variability in marker
+abundances within a sample
+- issue 1: how to get a robust estimate to the species abundance in the first
+  place (some interesting thoughts on this: https://paperpile.com/shared/rXTisc)
+- issue 2: how to relate that to the abundance of a single gene (for which
+  variablility can't even be assessed)
+
+
+
+- marker gene counts:
+  - /nobackup1/shogle/projects/pro_siderophores/metagenome_search/marker_counts/simons
+  - /nobackup1/shogle/projects/pro_siderophores/metagenome_search/marker_counts/tara
+- siderophore counts:
+  - /siderophore counts for both tara and simons: /nobackup1/shogle/projects/pro_siderophores/metagenome_search/tbdt_counts
+- reads:
+  - /nobackup1/chisholmlab/simons_metagenomes/read_data/qc_trimmed_libs_nonoverlap
+
+- ignoring ambigious reads -> source of variability, we should at least log the
+  number of ambigious reads ignored for each family
+
+** how much of variability is due to GC-bias
+get read GC for each count for each sample
+
+
+#+BEGIN_SRC sh
+# read GC
+SID=S0630
+KJ=/nobackup1/shogle/projects/pro_siderophores/metagenome_search/kaiju_output/simons/$SID.kaiju.gz
+FQ=/nobackup1/chisholmlab/simons_metagenomes/read_data/qc_trimmed_libs_nonoverlap/${SID}_1_trimmed.fq.gz
+seqtk subseq $FQ <(zcat $KJ | cut -f1) | seqtk comp | perl -ane 'printf "%0.3f\n", ($F[3]+$F[4])/$F[1]'
+
+S0630_2_trimmed.fq.gz
+
+
+
+#+END_SRC
+
+
+** estimate relative siderophore abundance
+- model distribution/dispersion of markers
+- assume marker dispersion also for sidero and model likelihoods for being
+  present in x% of population
+
+#+DOWNLOADED: file:///home/thackl/projects/research/siderophores/org/siderophores.png @ 2017-10-03 12:07:35
+[[file:Research Log/siderophores_2017-10-03_12-07-35.png]]
+
+#+BEGIN_SRC R
+library(magrittr)
+library(tidyverse)
+library(broom)
+library(stringr)
+library(ggpubr)
+
+# S0630_markers.tsv
+marker_dir <- "/nobackup1/shogle/projects/pro_siderophores/metagenome_search/marker_counts/simons/"
+marker_tpl <- paste0(marker_dir, "/%s_markers.tsv")
+marker_file <- function(SID) sprintf(marker_tpl, SID)
+
+# S0004_TBDT.tsv
+sphore_dir <- "/nobackup1/shogle/projects/pro_siderophores/metagenome_search/tbdt_counts/simons/"
+sphore_tpl <- paste0(marker_dir, "/%s_TBDT.tsv")
+sphore_file <- function(SID) sprintf(marker_tpl, SID)
+
+# read marker counts #######################################################
+
+d0 <- read_tsv(pipe(paste0("cat ", marker_dir, "*_markers.tsv")), col_names=c("SID", "Group", "COG", "total_reads", "count", "marker_length"))
+
+# get some random samples
+set.seed(1337)
+SIDs <- d1$SID %>% sample(50) %>% sort
+
+# normalize counts
+d1 <- d0 %>%
+    mutate(
+        Group=str_replace(Group, "Prochorococcus", "Prochlorococcus"),
+        # normalize by marker length
+        count_length = count/marker_length,
+        # relative abundance w/r/t lib size
+        count_norm = count_length/total_reads) %>%
+    replace_na(list(count_norm=0))        
+
+# get quantiles
+ds1 <- d1 %>% group_by(SID, Group) %>%
+    do(tidy(t(quantile(.$count_norm)))) %>%
+    select(SID, Group, median=X50., min=X0., max=X100., q25=X25., q75=X75.)
+
+# plot quantiles of relative marker abundances
+theme_set(theme_bw() + theme(
+    panel.grid.minor.x=element_blank(),
+    panel.grid.major.x=element_blank()))
+
+gg_marker <- ds1 %>%
+    filter(Group == "Prochlorococcus") %>%
+    filter(SID %in% SIDs) %>% # plot subset
+    ggplot() + aes(x=SID, y=median) +
+    geom_pointrange(aes(ymin=q25, ymax=q75)) +
+    scale_y_log10() +
+    coord_flip()
+gg_marker
+
+
+# read siderophore counts ###########################################
+s0 <- read_tsv(pipe(paste0("cat ", sphore_dir, "*_TBDT.tsv")), col_names=c("SID", "Group", "COG", "total_reads", "count", "marker_length")) %>%
+    mutate(Group=str_to_title(Group))
+
+# normalize sphore counts
+s1 <- s0 %>% left_join(ds1) %>%
+    mutate(
+        # normalize by marker length
+        count_length = count/marker_length,
+        # relative abundance w/r/t lib size
+        count_norm = count_length/total_reads,
+        # relative to organism
+        count_frac = count_norm/median
+    ) %>%
+    replace_na(list(count_norm=0))        
+
+s1 %<>%filter(Group == "Prochlorococcus") #%>%
+#    filter(SID %in% SIDs) %>% # plot subset
+
+s1$SID<-factor(s1$SID)
+
+s1 %<>% arrange(count_frac)
+s1$SID<-factor(s1$SID, levels=unique(s1$SID))
+
+# plot sphores + marker
+theme_set(theme_bw() + theme(
+    panel.grid.minor=element_blank(),
+    panel.grid.major=element_blank()))
+
+s1_gg1 <- s1 %>% 
+    ggplot() + aes(x=SID, y=median) +
+    geom_pointrange(aes(ymin=q25, ymax=q75)) +
+    geom_point(aes(y=count_norm, color="Siderophore\nTransporter")) +
+    scale_y_log10() +
+    coord_flip() + theme(legend.position="none")
+
+s1_gg2 <- s1 %>% 
+    ggplot() + aes(x=SID, y=count_frac) +
+    geom_point(aes(color="Siderophore\nTransporter")) +
+    coord_flip() + theme(
+        axis.ticks.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.title.y=element_blank()
+        )
+                   
+ggarrange(s1_gg1, s1_gg2)
+
+
+# read meta data ##########################################################
+m0 <- readRDS("../SLH_compiled_simons_metadata.rds")
+
+s1 %<>% left_join(m0 %>% rename(SID=SAMPLE))
+s1$SID<-factor(s1$SID)
+s1 %<>% arrange(count_frac)
+s1$SID<-factor(s1$SID, levels=unique(s1$SID))
+
+# plot sphores + marker
+theme_set(theme_bw() + theme(
+    panel.grid.minor=element_blank(),
+    panel.grid.major=element_blank()))
+
+s1_gg1 <- s1 %>% 
+    ggplot() + aes(x=SID, y=median) +
+    geom_pointrange(aes(ymin=q25, ymax=q75)) +
+    geom_point(aes(y=count_norm, color="Siderophore\nTransporter")) +
+    scale_y_log10() +
+    coord_flip() + theme(legend.position="none")
+
+s1_gg2 <- s1 %>% 
+    ggplot() + aes(x=SID, y=count_frac) +
+    geom_point(aes(color="Siderophore\nTransporter")) +
+    coord_flip() + theme(
+        axis.ticks.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.title.y=element_blank()
+    )
+
+s1_gg3 <- s1 %>%
+    ggplot() + aes(x=SID, y=OCEAN) +
+    geom_tile(aes(fill=OCEAN)) + coord_flip() +
+    theme(
+        axis.ticks.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.title.y=element_blank()
+    )
+
+
+# no real depth signal
+s1$DEPTH[is.na(s1$DEPTH) | s1$DEPTH >500] <- 501 
+s1_gg4 <- s1 %>%
+    ggplot() + aes(x=SID, y=DEPTH) +
+    geom_point(aes(color=DEPTH)) +
+    coord_cartesian(ylim=c(0,500)) +
+    coord_flip() +
+    theme(
+        axis.ticks.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.title.y=element_blank()
+    )
+s1_gg4
+
+ggarrange(s1_gg1, s1_gg2, s1_gg3,
+          ncol=3, widths=c(3,1,1), legend="bottom")
+
+ggsave("siderophores.png")
+
+# rigdges
+library(ggridges)
+dev.new()
+ggplot(s1, aes(x=count_frac, y=OCEAN)) + geom_density_ridges()
+
+#########################################################################
+
+s1 %>%
+    filter(Group == "prochlorococcus") %>%
+    filter(SID %in% SIDs)
+# %>%
+#    group_by(SID) %>%
+#    arrange(cnorm) %>%
+#    mutate(rank=row_number())
+
+ds2 <- d1 %>%
+    group_by(COG) %>%
+    summarize(median=median(cnorm, na.rm=TRUE)) %>%
+    arrange(median)
+
+d2 <- d1 %>% left_join(ds2)
+
+
+
+d2$COG <- factor(d2$COG, levels=ds2$COG)
+
+# plot rank for each gene
+ggplot(d2) + geom_boxplot(aes(x=COG, y=rank))
+
+
+#
+
+
+
+theme_set(theme_bw())
+
+
+d2 <- d2 %>% filter(SID %in% SIDs)
+#d2 <- filter(SID %in% SIDs, Group=="Prochorococcus") %>% # yeah, typo :)
+s2 <- filter(s1, SID %in% SIDs, Group=="prochlorococcus")
+
+ggplot(d2) + aes(y=cnorm, x=SID, fill=Group) + geom_violin(draw_quantiles=.5) +
+    geom_point(data=s2, aes(y=cnorm, x=SID, color="Siderophore"), size=3) +
+    scale_y_log10()
+
+
+ds2 <- d1 %>%
+    group_by(SID) %>%
+    summarize(median=median(cnorm, na.rm=TRUE)) %>%
+    arrange(median)
+d2$SID <- factor(d2$SID, levels=ds2$SID)
+
+
+
+ggplot(d2) + aes(y=cnorm, x=Group, fill=Group) + geom_violin(draw_quantiles=.5) +
+    scale_y_log10() + facet_wrap(~SID, nrow=1)
+#+END_SRC
+
+** do some statistics
+
+Question: Is there /significant/ difference in the abundance of
+/Siderophore/ transporter (OMSTs) genes in different /Ocean (regimes)/ 
+
+Somehow I want to compare observed proportions of /Siderophore/ transporter genes in the
+different Oceans. Of top of head: 1 nominal/categorial variable (Ocean)
+
+One level of complexity is that I am comparing a single gene of interest to a
+bunch o marker genes, which is somehow a weird case. Workaround for the time being:
+
+Test OMST against a single marker family; repeat for all families; compare
+results. For example, if "significant in 95% of cases": in case OMST behaves
+like 95% of other genes in the set do, there is significant signal. If it
+behaves like the 5% other percent, than what we see is not significant.
+
+*** DISC classical tests - Kruskal Wallis
+
+There are a lot of more or less /classical/ statistical test, like ANOVA and
+derivatives that may or may not be suited for this case. However, most of these
+test, as far as I understand at least make some assumptions regarding normality,
+homoscedasticity, etc. that this data set most likely violates:
+
+| assumes:                                            | normality | homoscedasticity | other problems            |
+|-----------------------------------------------------+-----------+------------------+---------------------------|
+| Anova                                               | +         | +                |                           |
+| Welch's Anova                                       | -         | +                |                           |
+| Mann-Whitney-U / Wilcoxon rank-sum test (2 groups)  | -         | ?                |                           |
+| Wilcoxon signed-rank test                           |           |                  |                           |
+| Kruskal-Wallis (Mann-Whitney-U for multiple groups) | -         | -                | ranked - issues with ties |
+
+
+Some background information:
+"Comparing multiple proportions", i.e. proportions observed in /n/ samples from
+the North/South Atlantic and Pacific (/4 groups/). Second part of
+https://web.stanford.edu/class/psych10/schedule/P10_W7L1
+
+
+http://www.statisticshowto.com/kruskal-wallis/
+http://www.r-tutor.com/elementary-statistics/non-parametric-methods/kruskal-wallis-test
+https://rcompanion.org/rcompanion/d_06.html
+
+#+BEGIN_SRC R
+library(magrittr)
+library(tidyverse)
+library(broom)
+library(stringr)
+library(ggpubr)
+
+# Get the data #############################################################
+marker_dir <- "/nobackup1/shogle/projects/pro_siderophores/metagenome_search/marker_counts/simons/"
+marker_tpl <- paste0(marker_dir, "/%s_markers.tsv")
+marker_file <- function(SID) sprintf(marker_tpl, SID)
+
+# S0004_TBDT.tsv
+sphore_dir <- "/nobackup1/shogle/projects/pro_siderophores/metagenome_search/tbdt_counts/simons/"
+sphore_tpl <- paste0(sphore_dir, "/%s_TBDT.tsv")
+sphore_file <- function(SID) sprintf(sphore_tpl, SID)
+
+# read marker counts #######################################################
+d0 <- read_tsv(pipe(paste0("cat ", marker_file("*"))), col_names=c("SID", "Group", "COG", "total_reads", "count", "marker_length"))
+
+# normalize counts
+d1 <- d0 %>%
+    mutate(
+        Group=str_replace(Group, "Prochorococcus", "Prochlorococcus"),
+        # normalize by marker length
+        count_length = count/marker_length,
+        # relative abundance w/r/t lib size
+        count_norm = count_length/total_reads) %>%
+    replace_na(list(count=0, count_norm=0))
+
+      
+d1 %>% summary
+# get quantiles
+ds1 <- d1 %>% group_by(SID, Group) %>%
+    summarize(
+        total_reads=first(total_reads),
+        count_median=median(count),
+        count_norm_median=median(count_norm),
+        count_norm_q25=quantile(count_norm, probs=.25),
+        count_norm_q75=quantile(count_norm, probs=.75))
+
+# read siderophore counts ###########################################
+s0 <- read_tsv(pipe(paste0("cat ", sphore_file("*"))), col_names=c("SID", "Group", "COG", "total_reads", "count", "marker_length")) %>%
+    mutate(Group=str_to_title(Group))
+
+# normalize sphore counts
+s1 <- s0 %>% left_join(ds1) %>%
+    mutate(
+        # normalize by marker length
+        count_length = count/marker_length,
+        # relative abundance w/r/t lib size
+        count_norm = count_length/total_reads,
+        # relative to organism
+        count_norm_frac = count_norm/count_norm_median
+    ) %>%
+    replace_na(list(count_norm=0))        
+
+s1 %<>%filter(Group == "Prochlorococcus") #%>%
+#    filter(SID %in% SIDs) %>% # plot subset
+
+s1$SID<-factor(s1$SID)
+s1 %<>% arrange(count_norm_frac)
+s1$SID<-factor(s1$SID, levels=unique(s1$SID))
+
+
+# read meta data ##########################################################
+m0 <- readRDS("../SLH_compiled_simons_metadata.rds")
+
+s1 %<>% left_join(m0 %>% rename(SID=SAMPLE))
+s1$SID<-factor(s1$SID)
+s1 %<>% arrange(count_norm_frac)
+s1$SID<-factor(s1$SID, levels=unique(s1$SID))
+
+
+# subsample
+set.seed(1337)
+SIDs <- d1$SID %>% sample(50) %>% sort
+
+# clean data #########################################################
+# remove HOT/BATS timeseries - overrep. of one station
+
+s2 <- s1 %>% filter(!(CRUISE %in% c("HOT", "BATS") | is.na(CRUISE)))
+s2 %>% group_by(CRUISE) %>% summarize(n=n())
+
+s3 <- s2
+s3$OCEAN <- as.factor(s3$OCEAN)
+
+# TEST
+# Are groups different? - Kruskal-Wallis
+# Do marker signals differ between oceans
+d2 <- d1 %>%
+    left_join(ds1) %>%
+    left_join(m0 %>% rename(SID=SAMPLE)) %>%
+    filter(!(CRUISE %in% c("HOT", "BATS") | is.na(CRUISE))) %>%
+    filter(count_median>=20) %>% # filter sample with too little 
+    mutate(count_norm_frac = count_norm/count_norm_median) %>%
+    replace_na(list(count=0, count_norm=0, count_norm_frac=0))
+
+ggplot(d2) + aes(y=count_norm_frac, x=OCEAN, color=OCEAN) +
+    geom_violin() +
+    geom_jitter(data=s3) +
+    scale_y_log10()
+
+# kruskal needs factorized categorials
+d2$OCEAN <- as.factor(d2$OCEAN)
+
+d2$COG %>% unique %>% length
+
+for (i in 1:1){
+    d2_COG <- d2 %>% filter(COG==d2$COG[i])
+    kruskal.test(count_norm_frac~OCEAN, d2_COG)
+}
+
+        ggplot(d2_COG) + aes(y=count_norm_frac, x=OCEAN, color=OCEAN) +
+    geom_violin() +
+    geom_jitter(data=s3)
+
+    dunnTest(count_norm_frac~OCEAN, data=d2_COG, method="bh")
+
+
+
+
+
+
+
+
+
+
+
+
+
+kruskal.test(count_norm_frac~OCEAN, s3)
+
+
+s3
+
+kruskal.test(count_norm_median~OCEAN, s3)
+dunnTest(count_norm_median~OCEAN,
+    data=s3,
+    method="bh")
+
+# Which groups are different? - Posthoc Dunn's test
+### Order groups by median
+s3$OCEAN = factor(s3$OCEAN,
+                      levels=c("North Atlantic", "South Atlantic", "South Pacific"))
+
+### Dunn test
+
+library(FSA)
+
+PT = dunnTest(count_norm_frac~OCEAN,
+    data=s3,
+    method="bh")
+PT
+summary(PT)
+#+END_SRC
+
+*** REJC generalized linear models
+    CLOSED: [2017-10-09 Mon 15:35]
+These might be a better way to approach the somewhat more complex assumptions
+one has to make about the data at hand
+
+Main problem, however , need to assume a certain distribution for the data, and
+this is kind of hard.
+
+Let's give the good old [[http://www.bodowinter.com/tutorial/bw_LME_tutorial1.pdf][Bodo Winter]] a try
+
+#+BEGIN_SRC R :session
+library(magrittr)
+library(tidyverse)
+library(broom)
+library(stringr)
+library(ggpubr)
+
+# Get the data #############################################################
+marker_dir <- "/nobackup1/shogle/projects/pro_siderophores/metagenome_search/marker_counts/simons/"
+marker_tpl <- paste0(marker_dir, "/%s_markers.tsv")
+marker_file <- function(SID) sprintf(marker_tpl, SID)
+
+# S0004_TBDT.tsv
+sphore_dir <- "/nobackup1/shogle/projects/pro_siderophores/metagenome_search/tbdt_counts/simons/"
+sphore_tpl <- paste0(sphore_dir, "/%s_TBDT.tsv")
+sphore_file <- function(SID) sprintf(sphore_tpl, SID)
+
+# read marker counts #######################################################
+d0 <- read_tsv(pipe(paste0("cat ", marker_file("*"))), col_names=c("SID", "Group", "COG", "total_reads", "count", "marker_length"))
+
+# normalize counts
+d1 <- d0 %>%
+    mutate(
+        Group=str_replace(Group, "Prochorococcus", "Prochlorococcus"),
+        # normalize by marker length
+        count_length = count/marker_length,
+        # relative abundance w/r/t lib size
+        count_norm = count_length/total_reads) %>%
+    replace_na(list(count=0, count_norm=0))
+
+      
+d1 %>% summary
+# get quantiles
+ds1 <- d1 %>% group_by(SID, Group) %>%
+    summarize(
+        total_reads=first(total_reads),
+        count_median=median(count),
+        count_norm_median=median(count_norm),
+        count_norm_q25=quantile(count_norm, probs=.25),
+        count_norm_q75=quantile(count_norm, probs=.75))
+
+# plot quantiles of relative marker abundances
+theme_set(theme_bw() + theme(
+    panel.grid.minor.x=element_blank(),
+    panel.grid.major.x=element_blank()))
+
+gg_marker <- ds1 %>%
+    filter(Group == "Prochlorococcus") %>%
+    ggplot() + aes(x=SID, y=count_norm_median) +
+#    geom_point(aes(y=total_reads, color="total_reads")) +
+    geom_pointrange(aes(ymin=count_norm_q25, ymax=count_norm_q75)) +
+    scale_y_log10() +
+    coord_flip()
+gg_marker
+
+
+# read siderophore counts ###########################################
+s0 <- read_tsv(pipe(paste0("cat ", sphore_file("*"))), col_names=c("SID", "Group", "COG", "total_reads", "count", "marker_length")) %>%
+    mutate(Group=str_to_title(Group))
+
+# normalize sphore counts
+s1 <- s0 %>% left_join(ds1) %>%
+    mutate(
+        # normalize by marker length
+        count_length = count/marker_length,
+        # relative abundance w/r/t lib size
+        count_norm = count_length/total_reads,
+        # relative to organism
+        count_frac = count_norm/count_norm_median
+    ) %>%
+    replace_na(list(count_norm=0))        
+
+s1 %<>%filter(Group == "Prochlorococcus") #%>%
+#    filter(SID %in% SIDs) %>% # plot subset
+
+s1$SID<-factor(s1$SID)
+
+s1 %<>% arrange(count_frac)
+s1$SID<-factor(s1$SID, levels=unique(s1$SID))
+
+# plot sphores + marker
+theme_set(theme_bw() + theme(
+    panel.grid.minor=element_blank(),
+    panel.grid.major=element_blank()))
+
+
+s1_gg1 <- s1 %>% 
+    ggplot() + aes(x=SID, y=count_norm_median) +
+    geom_pointrange(aes(ymin=count_norm_q25, ymax=count_norm_q75)) +
+    geom_point(aes(y=count_norm, color="Siderophore\nTransporter")) +
+    scale_y_log10() +
+    coord_flip() + theme(legend.position="none")
+
+s1_gg2 <- s1 %>% 
+    ggplot() + aes(x=SID, y=count_frac) +
+    geom_point(aes(color="Siderophore\nTransporter")) +
+    coord_flip() + theme(
+        axis.ticks.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.title.y=element_blank()
+        )
+                   
+
+ggarrange(s1_gg1, s1_gg2)
+
+
+# read meta data ##########################################################
+m0 <- readRDS("../SLH_compiled_simons_metadata.rds")
+
+s1 %<>% left_join(m0 %>% rename(SID=SAMPLE))
+s1$SID<-factor(s1$SID)
+s1 %<>% arrange(count_frac)
+s1$SID<-factor(s1$SID, levels=unique(s1$SID))
+
+# plot sphores + marker
+theme_set(theme_bw() + theme(
+    panel.grid.minor=element_blank(),
+    panel.grid.major=element_blank()))
+
+s1_gg1 <- s1 %>% 
+    ggplot() + aes(x=SID, y=count_median) +
+    geom_pointrange(aes(ymin=count_norm_q25, ymax=count_norm_q75)) +
+    geom_point(aes(y=count_norm, color="Siderophore\nTransporter")) +
+    scale_y_log10() +
+    coord_flip() + theme(legend.position="none")
+
+s1_gg2 <- s1 %>% 
+    ggplot() + aes(x=SID, y=count_frac) +
+    geom_point(aes(color="Siderophore\nTransporter")) +
+    coord_flip() + theme(
+        axis.ticks.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.title.y=element_blank()
+    )
+
+s1_gg3 <- s1 %>%
+    ggplot() + aes(x=SID, y=OCEAN) +
+    geom_tile(aes(fill=OCEAN)) + coord_flip() +
+    theme(
+        axis.ticks.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.title.y=element_blank()
+    )
+
+
+# no real depth signal
+s1$DEPTH[is.na(s1$DEPTH) | s1$DEPTH >500] <- 501 
+s1_gg4 <- s1 %>%
+    ggplot() + aes(x=SID, y=DEPTH) +
+    geom_point(aes(color=DEPTH)) +
+    coord_cartesian(ylim=c(0,500)) +
+    coord_flip() +
+    theme(
+        axis.ticks.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.title.y=element_blank()
+    )
+
+ggarrange(s1_gg1, s1_gg2, s1_gg3,
+          ncol=3, widths=c(3,1,1), legend="bottom")
+
+#ggsave("siderophores.png")
+
+# rigdges
+library(ggridges)
+dev.new()
+ggplot(s1, aes(x=count_frac, y=OCEAN)) + geom_density_ridges()
+
+
+# MODEL ##############################################################
+
+# Count: discrete dependent variable
+# (alternatively: ratio as dependent variable, continuous, but bounded ?!)
+# Ocean: categorial predictor, aka fixed effect
+
+# subsample
+set.seed(1337)
+SIDs <- d1$SID %>% sample(50) %>% sort
+
+# clean data #########################################################
+# remove HOT/BATS timeseries - overrep. of one station
+
+s2 <- s1 %>% filter(!(CRUISE %in% c("HOT", "BATS") | is.na(CRUISE)))
+s2 %>% group_by(CRUISE) %>% summarize(n=n())
+ggplot(s2, aes(x=count_frac, y=OCEAN)) + geom_density_ridges(alpha=.3) +
+    geom_density_ridges(aes(x=count/count_median), alpha=.3, color="blue")
+
+s2 %<>% mutate(count_rel=count/count_median)
+
+# What I need: Ocean:OCEAN, relative count: count_frac
+ggplot(s2) + aes(x=OCEAN, y=count_rel) +
+    geom_violin() + geom_jitter() + scale_y_log10()
+
+
+d1
+
+d2 <- d1 %>% left_join(s2 %>% select(SID, count_omst=count, OCEAN))
+
+COGs <- d2 %>%
+    #sample_n(50) %>%
+    pull(COG)
+
+ggplot(d2 %>% filter(COG %in% COGs)) + aes(x=count, y=count_omst, color=OCEAN, shape=COG) +
+    geom_point(size=.2) + geom_smooth(method = "lm", se=FALSE, size=.5, alpha=.3) +
+    scale_x_log10() + scale_y_log10() + theme(legend.position="none")
+
+# standardizing ######################################################
+# https://stats.stackexchange.com/questions/237963/how-to-formulate-the-offset-of-a-glm
+
+
+# simple LM #############################################
+# model siderophore ocean
+ml0 <- lm(count_frac ~ OCEAN, s2)
+ml1 <- lm(count_rel ~ OCEAN, s2)
+ml2 <- lm(log(count_rel) ~ OCEAN, s2)
+
+log(s2$count_rel)
+
+summary(ml0)
+summary(ml1)
+# check model assumptions
+dev.new()
+par(mfrow=c(2,2))
+# linearity/homoscedasticity - weird for categorial predictor
+plot(ml0)
+# normality
+
+
+
+# GLM ##########################################################
+## modeling percentages
+## https://stats.stackexchange.com/questions/237963/how-to-formulate-the-offset-of-a-glm
+## mgl0 <- glm(count_frac~OCEAN, "poisson", data=s2)
+## dev.new()
+## par(mfrow=c(2,2))
+## mgl0 %T>% plot %T>% summary
+
+## modeling raw counts
+# poisson
+mgl1 <- glm(count_rel~OCEAN, "poisson", data=s2)
+dev.new()
+par(mfrow=c(2,2))
+mgl1 %T>% plot(., main="glm-ratio-qp") %T>% summary
+
+mgl1.2 <- glm(count~count_median+OCEAN, "poisson", data=s2)
+dev.new()
+par(mfrow=c(2,2))
+mgl1.2 %T>% plot(., main="glm-count-p") %T>% summary
+
+mgl1.3 <- glm(count~count_median+OCEAN, "quasipoisson", data=s2)
+dev.new()
+par(mfrow=c(2,2))
+mgl1.3 %T>% plot(., main="glm-count-qp") %T>% summary
+
+# binomial doesn't work because of >1 ratios
+# glm binomial for proportional data requires 2 column matrix as input (success/failure)
+
+y <- cbind(s2$count, as.integer(s2$count_median-s2$count))
+y[y<0] <- 0
+
+y
+
+
+mgl2 <- glm(y~OCEAN, "quasibinomial", data=s2)
+dev.new()
+par(mfrow=c(2,2))
+mgl2 %T>% plot(., main="glm-ratio-qb") %T>% summary
+
+summary(mgl2)
+
+y
+
+mgl2.1 <- glm(y~OCEAN, "binomial", data=s2)
+dev.new()
+par(mfrow=c(2,2))
+mgl2.1 %T>% plot(., main="glm-ratio-qb") %T>% summary
+
+
+# this uses an offset, motivated by scaling problems in the zeroinfl model used
+# below
+mgl3 <- glm(count~OCEAN+offset(log(count_median)), "poisson", data=s2)
+dev.new()
+par(mfrow=c(2,2))
+mgl3 %T>% plot(., main="glm-offset-po") %T>% summary
+
+
+# NB
+# https://stats.stackexchange.com/questions/27773/how-does-glm-nb-work
+
+# this uses an offset, motivated by scaling problems in the zeroinfl model used
+# below
+require(MASS)
+
+mgl4 <- MASS::glm.nb(count~OCEAN+offset(log(count_median)), data=s2)
+dev.new()
+par(mfrow=c(2,2))
+mgl4 %T>% plot(., main="glm-offset-nb") %T>% summary
+
+mgl5 <- MASS::glm.nb(count_rel~OCEAN, data=s2)
+dev.new()
+par(mfrow=c(2,2))
+mgl5 %T>% plot(., main="glm-count_rel-nb") %T>% summary
+
+
+
+mgl6 <- MASS::glm.nb(count~count_median+OCEAN, data=s2)
+dev.new()
+par(mfrow=c(2,2))
+mgl6 %T>% plot(., main="glm-count-nb") %T>% summary
+
+
+library(pscl)
+mgl7 <- zeroinfl(count~count_median+OCEAN, data=s2, dist="negbin", EM=TRUE)
+mgl7 %>% summary
+
+# NB w/ interaction betweeen OCEAN and reads
+mgl8 <- glm.nb(count~OCEAN*total_reads, data=s2)
+dev.new()
+par(mfrow=c(2,2))
+mgl8 %T>% plot(., main="mgl-nb-interaction") %T>% summary
+
+x <- bind_rows(
+    .id="model",
+    `0_DATA`=s2,
+    `1_mgl_qp`=data_frame(
+         OCEAN=mgl1.2$model$OCEAN,
+        count=predict(mgl1.2, type="response")),
+    `2_mgl_qb`=data_frame(
+        OCEAN=mgl2$model$OCEAN,
+        count=predict(mgl2, type="response") * rowSums(y)),
+    `3_mgl_b`=data_frame(
+        OCEAN=mgl2.1$model$OCEAN,
+        count=predict(mgl2.1, type="response") * rowSums(y)),
+    `4_mgl6_nb`=data_frame(
+        OCEAN=mgl6$model$OCEAN,
+        count=predict(mgl6, type="response")),
+    `5_mgl4_nb-o`=data_frame(
+        OCEAN=mgl4$model$OCEAN,
+        count=predict(mgl4, type="response")),
+    `6_mgl4_nb-z`=data_frame(
+        OCEAN=mgl7$model$OCEAN,
+        count=predict(mgl7, type="response"))
+    )
+
+ggplot(x) + aes(x=OCEAN, y=count, color=model) + geom_boxplot() +
+    scale_y_log10()
+
+
+
+# random marker effect
+COGs <- d2 %>%
+    sample_n(10) %>%
+    pull(COG)
+
+d3 <- d2 %>% filter(COG %in% COGs)
+install.packages("glmm")
+glmm_qp <- glmer(count_omst~count+OCEAN+(1|COG), family=neg.bin(theta=1), data=d3)
+dev.new()
+par(mfrow=c(2,2))
+glmm_qp %T>% plot(., main="glmm-count-qp") %T>% summary
+
+plot(glmm_qp)
+
+
+# NB zero inflated https://stats.idre.ucla.edu/r/dae/zinb/
+# straight-forward seems to fail, looks like an issue with very different scales of count and total_reads
+
+# normally this sounds like a case for standardizing (scaling+centering), but I don't think that would work with nb/poisson
+
+# another way could be an offset
+dev.off()
+ggplot(s1 %>% filter(CRUISE %in% c("HOTS", "BATS"))) + aes(x=SID, y=count_median) + geom_point()
+
+s1 %>% filter(CRUISE %in% c("HOTS", "BATS")) %>% summarize(sum(count_median))
+#+END_SRC
+
+*** REJC view as binomial problem
+    CLOSED: [2017-10-09 Mon 15:35]
+
+binomial glm's can compare proportions of success/failure (having gene vs not
+having gene). *In R, y needs to be given as matrix with two columns(success,
+failure)!*.
+
+Case/Problem 1: I don't really have number of failures. If I look at the case "gene vs
+indv. marker", I could approximate failure, by setting the abundance of marker
+as the N (total number of events), and failures would become N - n (gene
+counts). But, I do have cases with n>N, i.e. negative numbers, and that doesn't
+fly with binomial
+
+FYI, use quasibinomial in case of overdispersion.
+
+Case/Problem 2: I could interpret the number of all pro reads as N, and the
+number of siderophore reads as counts as n (successes).
+** unstable Pro marker, particularly in presense of Syn
+
+There are two sides to this issue:
+
+- Counts lost from Pro genes due to ambiguity to Syn genes
+- Counts added to Pro from Syn genes without proper representation
+
+=> can't just assume counts that stay high are stable
+
+Find all markers that "never" get Syn hits - see if they are more stable
+
+#+BEGIN_SRC R
+library(magrittr)
+library(tidyverse)
+library(broom)
+library(stringr)
+library(ggpubr)
+
+# Get the data #############################################################
+marker_dir <- "/nobackup1/shogle/projects/pro_siderophores/metagenome_search/marker_counts/simons/"
+marker_tpl <- paste0(marker_dir, "/%s_markers.tsv")
+marker_file <- function(SID) sprintf(marker_tpl, SID)
+
+# S0004_TBDT.tsv
+sphore_dir <- "/nobackup1/shogle/projects/pro_siderophores/metagenome_search/tbdt_counts/simons/"
+sphore_tpl <- paste0(sphore_dir, "/%s_TBDT.tsv")
+sphore_file <- function(SID) sprintf(sphore_tpl, SID)
+
+# read marker counts #######################################################
+d0 <- read_tsv(pipe(paste0("cat ", marker_file("*"))), col_names=c("SID", "Group", "COG", "total_reads", "count", "marker_length"))
+
+read_length <- 250 # 2 * 150 overlapping, i.e. ~250 bp per read pair
+
+
+#library(tabplot)
+#itableplot()
+
+
+
+## Filter samples  #############################################################
+## ... with low pro coverage ###################################################
+# median of all length-norm markers (some samples are missing markers!)
+# get length norm median per COG (account for missing COGs in some SIDs)
+d1 <- d0 %>%
+    mutate(
+        # fix stupid typo
+        Group=str_replace(Group, "Prochorococcus", "Prochlorococcus"),
+        # normalize by marker length
+        count_length = count/marker_length * 1000)
+
+median_fill_up <- function(x, to=length(x), with=0){
+    if(to<length(x)) stop("to needs to be >= length(x)")
+    x <- as.vector(na.omit(x))
+    x <- c(x, rep(with, to-length(x)))
+    median(x)
+}
+
+COG_n <- d0$COG %>% unique %>% length
+d1s1 <- d1 %>% group_by(Group, SID) %>%
+    summarize(
+        COG_median=median_fill_up(count_length, COG_n))
+
+d2 <- d1s1 %>% filter(Group=="Prochlorococcus" & COG_median >100) %>%
+    ungroup %>% select(SID) %>%
+    right_join(d1, .)
+
+
+## # DEPRECATED: hard read cutoff - seems to be sensitive to outliers...
+## # ~650 kbp Pro Marker, ~250 bp reads
+
+## d1s1 <- d1 %>% replace_na(list(count=0)) %>%
+##     group_by(Group, SID) %>%
+##     summarize(
+##         marker_n=n(),
+##         marker_count_sum=sum(count),
+##         marker_length_sum=sum(marker_length),
+##         marker_count_q10=quantile(count, probs=.10),
+##         marker_count_q90=quantile(count, probs=.90))
+
+## pro_marker_length_sum <- d1s1 %>%
+##     filter(Group=="Prochlorococcus") %>%
+##     pull(marker_length_sum) %>% median
+
+## # set to ~40 X Pro coverage
+## counts_per_sample_threshold <- 100000
+## coverage_threshold <- round(counts_per_sample_threshold * read_length / pro_marker_length_sum, 2)
+## # 41.1
+
+## SIDs_low_cov <- d1s1 %>%
+##     filter(Group=="Prochlorococcus" & marker_count_sum < counts_per_sample_threshold) %>% pull(SID)
+
+## d1 %<>% filter(!(SID %in% SIDs_low_cov))
+
+## Filter bad markers ##########################################################
+# q10 and q90 markers
+# this ignores the fact that COGs are missing from some SIDs (not even 0s)
+d2s1 <- d2 %>%
+    replace_na(list(count=0, count_length=0)) %>%
+    group_by(Group, SID) %>%
+    summarize(
+        count_length_q10=quantile(count_length, probs=.10),
+        count_length_q90=quantile(count_length, probs=.90))
+
+d3 <- d2 %>% left_join(d2s1) %>%
+    filter(count_length > count_length_q10 & count_length < count_length_q90)
+
+# not present in all samples
+COGs_universal <- d3 %>% filter(Group=="Prochlorococcus") %>%
+    group_by(COG) %>%
+    summarize(COG_n = n()) %>%
+    filter(COG_n == max(COG_n)) %>%
+    pull(COG)
+
+d4 <- d3 %>% filter(COG %in% COGs_universal)
+
+## Plot filtered samples
+# get quantiles
+d4s1 <- d4 %>% group_by(SID, Group) %>%
+    summarize(
+        total_reads=first(total_reads),
+        count_length_median=median(count_length),
+        count_length_q25=quantile(count, probs=.25),
+        count_length_q75=quantile(count, probs=.75))
+        
+
+ggplot(d4s1) + aes(x=SID, y=count_length_median) +
+    geom_pointrange(aes(ymin=count_length_q25, ymax=count_length_q75), size=.2) +
+    geom_point(aes(y=count_length_median, color=Group), size=.3) +
+    scale_y_log10() +
+    coord_flip() + theme(legend.position="none") + facet_grid(~Group)
+
+## normalize counts #######################################################
+d5 <- d4 %>% mutate(
+    # relative abundance w/r/t lib size
+    count_norm = count_length/total_reads,
+    count_norm_log = log10(count_norm)) %>%
+    replace_na(list(count=0, count_length=0, count_norm=0))
+
+# get quantiles
+d5s1 <- d5 %>% group_by(SID, Group) %>%
+    summarize(
+        total_reads=first(total_reads),
+        count_norm_median=median(count_norm),
+        count_norm_q25=quantile(count_norm, probs=.25),
+        count_norm_q75=quantile(count_norm, probs=.75))
+
+
+d5s1
+
+ggplot(d5s1) + aes(x=SID, y=count_norm_median) +
+    geom_pointrange(aes(ymin=count_norm_q25, ymax=count_norm_q75), size=.2) +
+    geom_point(aes(color=Group), size=.3)
+    coord_flip() + theme(legend.position="none") + facet_grid(~Group)
+
+
+# read meta data ##########################################################
+m0 <- readRDS("../SLH_compiled_simons_metadata.rds") %>%
+    mutate(SID=SAMPLE)
+
+d5s1 %<>% left_join(m0)
+
+d5s2 <- d5s1
+SID_by_Syn <- d5s1 %>% filter(Group=="Synechococcus") %>%
+    arrange(count_norm_median) %>%
+    pull(SID)
+d5s2$SID<-factor(d5s2$SID, levels=SID_by_Syn)
+
+d5s2 <- d5s1
+SID_by_Pro <- d5s1 %>% filter(Group=="Prochlorococcus") %>%
+    arrange(count_norm_median) %>%
+    pull(SID)
+d5s2$SID<-factor(d5s2$SID, levels=SID_by_Pro)
+
+
+ggplot(d5s2) + aes(x=SID, y=count_norm_median) +
+    geom_pointrange(aes(ymin=count_norm_q25, ymax=count_norm_q75), size=.2) +
+    geom_point(aes(y=count_norm_median, color=Group), size=.3) +
+    scale_y_log10() +
+    coord_flip() + theme(legend.position="none") + facet_grid(Group~CRUISE)
+
+ggsave("normalized-median-counts_by_sample-and-cruise.png")
+
+# TEST #########################################################################
+# Are groups different? - Kruskal-Wallis
+# Do marker signals differ between oceans
+d6 <- d5 %>%
+    filter(Group=="Prochlorococcus") %>%
+    left_join(d5s1) %>%
+    filter(!(CRUISE %in% c("HOT", "BATS") | is.na(CRUISE))) %>%
+    mutate(
+        count_norm_frac = count_norm/count_norm_median,
+        count_norm_frac_fc_log2 = log2(count_norm/count_norm_median)
+    ) %>%
+    replace_na(list(count=0, count_norm=0, count_norm_frac=0, count_norm_frac_fc_log2=0))
+
+
+# kruskal needs factorized categorials
+d6$OCEAN <- as.factor(d6$OCEAN)
+
+d7 <- d6 %>% group_by(COG) %>%
+    do({
+        p <- kruskal.test(count_norm_frac_fc_log2~OCEAN, .)$p.value;
+        data_frame(COG=.$COG[1], kw_p_value=p, signif=ifelse(p<0.05, "*", ""))
+    }) %>% left_join(d6, .)
+
+
+theme_set(theme_grey(base_size=8) + theme(
+    panel.grid.minor=element_blank(),
+    panel.grid.major=element_blank(),
+    axis.text.x=element_blank()))
+
+gg <- ggplot(d7) + aes(y=count_norm_frac_fc_log2, x=OCEAN, color=signif) +
+    geom_hline(yintercept=0, color="grey50", linetype=2) +
+    geom_boxplot(outlier.size=.5) +
+    scale_color_manual(values=c("grey20", "grey80")) +
+    #scale_y_log10() +
+#    coord_cartesian(ylim=c(0.9,1.1)) +
+    facet_wrap(~COG, nrow=5)
+gg
+ggsave("relative-core-gene-abundances-fc-log2-by-ocean.png", plot=gg)
+#+END_SRC
+
+** DESeq2
+http://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html
+
+Overall, DESeq2 seems to work quite well. Better variance stabilization helps a
+lot with calling fewer genes /differentially abundant/. Nevertheless, quite a
+considerable number still is significantly different between oceans.
+
+Then again, this is not surprising considering the high-dimensionality of the
+data. Likely source of noise are:
+- highly conserved genes 
+  - ambigious mappings are ignored
+  - at the same time cross-mappings from other taxa with poor reference representation likely
+- highly diverse genes 
+  - missed due to incomplete reference
+  - missed because search too specific
+- technical/sequencing biases: GC, motifs, ...
+- true differences - /Ocean/ is not exactly a defined biological condition...
+
+"marker-specific effects for the set of marker genes. The marker-specific effect
+can bedue to different GC contents, mappability and possible lateral gene
+transfers" (Chen, E. Z., Bushman, F. D., & Li, H. (2017). A Model-Based Approach
+For Species Abundance Quantification Based On Shotgun Metagenomic
+Data. Statistics in Biosciences, 9(1), 13–27.)
+
+[[file:DESeq2-core-genes-by-ocean.png]]
+
+DESeq2-1.14.2 log2 fold changes with standard error for pairs "North Atlantic -
+South Atlantic", "North Atlantiv - South Pacific", "South Atlantic - South
+Pacific" for ~300 COGs. Light grey points indicate differential abundance at
+significance threshold p-value < 0.05.
+
+#+BEGIN_SRC R
+library(magrittr)
+library(tidyverse)
+library(broom)
+library(stringr)
+library(ggpubr)
+
+# Get the data #############################################################
+marker_dir <- "/nobackup1/shogle/projects/pro_siderophores/metagenome_search/marker_counts/simons/"
+marker_tpl <- paste0(marker_dir, "/%s_markers.tsv")
+marker_file <- function(SID) sprintf(marker_tpl, SID)
+
+# S0004_TBDT.tsv
+sphore_dir <- "/nobackup1/shogle/projects/pro_siderophores/metagenome_search/tbdt_counts/simons/"
+sphore_tpl <- paste0(sphore_dir, "/%s_TBDT.tsv")
+sphore_file <- function(SID) sprintf(sphore_tpl, SID)
+
+# read marker counts #######################################################
+d0 <- read_tsv(pipe(paste0("cat ", marker_file("*"))), col_names=c("SID", "Group", "COG", "total_reads", "count", "marker_length"))
+
+read_length <- 250 # 2 * 150 overlapping, i.e. ~250 bp per read pair
+
+
+#library(tabplot)
+#itableplot()
+
+
+
+## Filter samples  #############################################################
+## ... with low pro coverage ###################################################
+# median of all length-norm markers (some samples are missing markers!)
+# get length norm median per COG (account for missing COGs in some SIDs)
+d1 <- d0 %>%
+    mutate(
+        # fix stupid typo
+        Group=str_replace(Group, "Prochorococcus", "Prochlorococcus"),
+        # normalize by marker length
+        count_length = count/marker_length * 1000)
+
+median_fill_up <- function(x, to=length(x), with=0){
+    if(to<length(x)) stop("to needs to be >= length(x)")
+    x <- as.vector(na.omit(x))
+    x <- c(x, rep(with, to-length(x)))
+    median(x)
+}
+
+COG_n <- d0$COG %>% unique %>% length
+d1s1 <- d1 %>% group_by(Group, SID) %>%
+    summarize(
+        COG_median=median_fill_up(count_length, COG_n))
+
+d2 <- d1s1 %>% filter(Group=="Prochlorococcus" & COG_median >100) %>%
+    ungroup %>% select(SID) %>%
+    right_join(d1, .)
+
+
+## # DEPRECATED: hard read cutoff - seems to be sensitive to outliers...
+## # ~650 kbp Pro Marker, ~250 bp reads
+
+## d1s1 <- d1 %>% replace_na(list(count=0)) %>%
+##     group_by(Group, SID) %>%
+##     summarize(
+##         marker_n=n(),
+##         marker_count_sum=sum(count),
+##         marker_length_sum=sum(marker_length),
+##         marker_count_q10=quantile(count, probs=.10),
+##         marker_count_q90=quantile(count, probs=.90))
+
+## pro_marker_length_sum <- d1s1 %>%
+##     filter(Group=="Prochlorococcus") %>%
+##     pull(marker_length_sum) %>% median
+
+## # set to ~40 X Pro coverage
+## counts_per_sample_threshold <- 100000
+## coverage_threshold <- round(counts_per_sample_threshold * read_length / pro_marker_length_sum, 2)
+## # 41.1
+
+## SIDs_low_cov <- d1s1 %>%
+##     filter(Group=="Prochlorococcus" & marker_count_sum < counts_per_sample_threshold) %>% pull(SID)
+
+## d1 %<>% filter(!(SID %in% SIDs_low_cov))
+
+## Filter bad markers ##########################################################
+# q10 and q90 markers
+# this ignores the fact that COGs are missing from some SIDs (not even 0s)
+d2s1 <- d2 %>%
+    replace_na(list(count=0, count_length=0)) %>%
+    group_by(Group, SID) %>%
+    summarize(
+        count_length_q10=quantile(count_length, probs=.10),
+        count_length_q90=quantile(count_length, probs=.90))
+
+d3 <- d2 %>% left_join(d2s1) %>%
+    filter(count_length > count_length_q10 & count_length < count_length_q90)
+
+# not present in all samples
+COGs_universal <- d3 %>% filter(Group=="Prochlorococcus") %>%
+    group_by(COG) %>%
+    summarize(COG_n = n()) %>%
+    filter(COG_n == max(COG_n)) %>%
+    pull(COG)
+
+d4 <- d3 %>% filter(COG %in% COGs_universal)
+
+## Plot filtered samples
+# get quantiles
+d4s1 <- d4 %>% group_by(SID, Group) %>%
+    summarize(
+        total_reads=first(total_reads),
+        count_length_median=median(count_length),
+        count_length_q25=quantile(count, probs=.25),
+        count_length_q75=quantile(count, probs=.75))
+        
+
+ggplot(d4s1) + aes(x=SID, y=count_length_median) +
+    geom_pointrange(aes(ymin=count_length_q25, ymax=count_length_q75), size=.2) +
+    geom_point(aes(y=count_length_median, color=Group), size=.3) +
+    scale_y_log10() +
+    coord_flip() + theme(legend.position="none") + facet_grid(~Group)
+
+library(DESeq2)
+
+# countData
+# integer count matrix, rows: gene, sample: column
+m0 <- readRDS("../SLH_compiled_simons_metadata.rds") %>%
+    rename(SID=SAMPLE)
+
+filter()
+
+
+d5 <- d4 %>%
+    left_join(m0) %>%
+    filter(!(CRUISE %in% c("HOT", "BATS") | is.na(CRUISE))) %>%
+    filter(Group=="Prochlorococcus")
+
+cts0 <- d5 %>%
+    select(SID, COG, count) %>%
+    spread(SID, count)
+cts1 <- as.matrix(cts0 %>% select(-COG)) %>%
+    set_rownames(cts0 %>% pull(COG))
+cts1[1:4,1:4]
+
+coldata <- d5 %>% group_by(SID) %>% summarize %>% left_join(m0)
+coldata
+
+ncol(cts1)
+nrow(coldata)
+
+dds <- DESeqDataSetFromMatrix(countData = cts1,
+                              colData = coldata,
+                              design = ~ OCEAN)
+
+dds <- DESeq(dds)
+res <- results(dds)
+res
+plotMA(res, ylim=c(-2,2))
+plotCounts(dds, gene=which.min(res$padj), intgroup="OCEAN")
+
+DE <- bind_rows(
+        .id="Contrast",
+        NA_SA = results(dds, contrast=c("OCEAN", "North Atlantic", "South Atlantic")) %>%
+            as_data_frame %>% mutate(
+                COG=rownames(res),
+                signif=ifelse(padj <0.05, "*", "")),
+        NA_SP = results(dds, contrast=c("OCEAN", "North Atlantic", "South Pacific")) %>%
+            as_data_frame %>% mutate(
+                COG=rownames(res),
+                signif=ifelse(padj <0.05, "*", "")),
+        SA_SP = results(dds, contrast=c("OCEAN", "South Atlantic", "South Pacific")) %>%
+            as_data_frame %>% mutate(
+                COG=rownames(res),
+                signif=ifelse(padj <0.05, "*", "")))
+
+theme_set(theme_grey(base_size=8) + theme(
+    panel.grid.minor=element_blank(),
+    panel.grid.major=element_blank(),
+    axis.text.x=element_blank()))
+
+gg <- ggplot(DE) + aes(y=log2FoldChange, x=Contrast, color=signif) +
+    geom_pointrange(aes(ymin=log2FoldChange-lfcSE, ymax=log2FoldChange+lfcSE)) +
+    scale_color_manual(values=c("grey20", "grey80")) +
+  facet_wrap(~COG, nrow=5)
+gg
+
+ggsave("DESeq2-core-genes-by-ocean.png", gg)
+#+END_SRC
+
+
+** publication ready figure
+ http://www.sthda.com/english/rpkgs/ggpubr/#box-plots-and-violin-plots
+ 
+- stable pro marker
+- log2 fold change
+
+
+#+BEGIN_SRC R
+library(magrittr)
+library(tidyverse)
+library(broom)
+library(stringr)
+library(ggpubr)
+
+# Get the data #############################################################
+marker_dir <- "/nobackup1/shogle/projects/pro_siderophores/metagenome_search/marker_counts/simons/"
+marker_tpl <- paste0(marker_dir, "/%s_markers.tsv")
+marker_file <- function(SID) sprintf(marker_tpl, SID)
+
+# S0004_TBDT.tsv
+sphore_dir <- "/nobackup1/shogle/projects/pro_siderophores/metagenome_search/tbdt_counts/simons/"
+sphore_tpl <- paste0(sphore_dir, "/%s_TBDT.tsv")
+sphore_file <- function(SID) sprintf(sphore_tpl, SID)
+
+
+# read metadata ###########################################
+m0 <- readRDS("../SLH_compiled_simons_metadata.rds") %>%
+    rename(SID=SAMPLE)
+
+# read marker counts #######################################################
+## MOUNT MIT!
+d0 <- read_tsv(pipe(paste0("cat ", marker_file("*"))), col_names=c("SID", "Group", "COG", "total_reads", "count", "marker_length"))
+
+d1 <- d0 %>%
+    # fix stupid typo
+    mutate(Group=str_replace(Group, "Prochorococcus", "Prochlorococcus")) %>%
+    # drop Syn/Cyano
+    filter(Group=="Prochlorococcus") %>%
+    # meta data
+    left_join(m0) %>%
+    # drop HOT/BATS and unknown Cruises
+    filter(!(CRUISE %in% c("HOT", "BATS") | is.na(CRUISE))) %>%
+#    filter(CRUISE %in% c("HOT", "BATS") | is.na(CRUISE)) %>%
+    # normalize by marker length
+    # >> need length norm because we do within sample comparisons
+    mutate(RPK = count/marker_length * 1e3)
+
+# read siderophore counts ###########################################
+s0 <- read_tsv(pipe(paste0("cat ", sphore_file("*"))), col_names=c("SID", "Group", "COG", "total_reads", "count", "marker_length"))
+
+s1 <- s0 %>%
+    # fix lower-case Group
+    mutate(Group=str_to_title(Group)) %>%
+    # normalize by marker length
+    mutate(RPK = count/marker_length * 1e3)
+
+
+## Filter samples  #############################################################
+## ... with low pro coverage ###################################################
+# median of all length-norm markers (some samples are missing markers!)
+# get length norm median per COG (account for missing COGs in some SIDs)
+
+# compute median of set x, fill set up 'to' length 'with' default 0. Also replace
+# NA 'with'
+median_fill_up <- function(x, to=length(x), with=0){
+    if(to<length(x)) stop("to needs to be >= length(x)")
+    x <- as.vector(na.omit(x))
+    x <- c(x, rep(with, to-length(x)))
+    median(x)
+}
+
+COG_n <- d0$COG %>% unique %>% length
+d1s1 <- d1 %>% group_by(Group, SID) %>%
+    summarize(
+        RPK_COG_median=median_fill_up(RPK, COG_n))
+
+
+# >> drop all samples with <25X median coverage per Marker
+d2 <- d1s1 %>% filter(Group=="Prochlorococcus" & RPK_COG_median >100) %>%
+    ungroup %>% select(SID) %>%
+    right_join(d1, .)
+
+
+## Filter bad markers ##########################################################
+# q10 and q90 markers
+# this ignores the fact that COGs are missing from some SIDs (not even 0s)
+d2s1 <- d2 %>%
+    replace_na(list(count=0, RPK=0)) %>%
+    group_by(Group, SID) %>%
+    summarize(
+        RPK_q10=quantile(RPK, probs=.10),
+        RPK_q90=quantile(RPK, probs=.90))
+
+d3 <- d2 %>% left_join(d2s1) %>%
+    filter(RPK > RPK_q10 & RPK < RPK_q90)
+
+# not present in all samples
+COGs_universal <- d3 %>% filter(Group=="Prochlorococcus") %>%
+    group_by(COG) %>%
+    summarize(COG_n = n()) %>%
+    filter(COG_n == max(COG_n)) %>%
+    pull(COG)
+
+# >> drop non-universal COGs
+d4 <- d3 %>% filter(COG %in% COGs_universal)
+d4$COG %>% unique %>% length
+# >> kept 277 markers
+
+## Plot filtered samples
+# get quantiles
+d4s1 <- d4 %>% group_by(SID, Group) %>%
+    summarize(
+        total_reads=first(total_reads),
+        RPK_sum=sum(RPK),
+        RPK_SID_median=median(RPK),
+        RPK_SID_q25=quantile(RPK, probs=.25),
+        RPK_SID_q75=quantile(RPK, probs=.75)) %>%
+            left_join(m0)
+        
+
+d4s1
+
+
+
+# >> compute fold change
+s2 <- s1 %>% inner_join(d4s1) %>%
+    left_join(m0) %>%
+    mutate(
+        fc = RPK/RPK_SID_median,
+        log2fc = log2(fc))
+
+write_tsv(s2, "../siderophore-abundance.tsv")
+#write_tsv(s2, "../siderophore-abundance-hot-bats-na.tsv")
+
+# sort by rel. abundance (and factorize for plot)
+s2$SID <- factor(s2$SID, s2 %>% arrange(fc) %>% pull(SID))
+d4s1$SID <- factor(d4s1$SID, levels(s2$SID))
+d4s1
+
+
+theme_set(theme_classic() + theme(
+    panel.grid.minor=element_blank(),
+    panel.grid.major=element_blank()))
+
+ocean_colors <- c("#a6cee3", "#1f78b4", "#c2a5cf")
+pro_color <- "#b2df8a"
+omst_color <- "gold"
+
+gg_a <- ggplot(d4s1) + aes(x=SID, y=RPK_SID_median) +
+    geom_pointrange(aes(ymin=RPK_SID_q25, ymax=RPK_SID_q75), size=.5, fatten=1) +
+    geom_point(aes(y=RPK_SID_median), color=pro_color, size=.3) +
+    geom_point(aes(y=RPK), fill=omst_color, s2, size=1, shape=21) +
+    scale_y_log10("Counts per kbp", limits=c(5,NA)) +
+    scale_x_discrete("Samples") +
+    scale_fill_manual(values=c(omst_color, pro_color)) +
+#    scale_fill_manual(values=ocean_colors) +
+    #facet_wrap(~OCEAN, ncol=1, strip.position="left", scales="free_y") +
+    coord_flip() + theme(legend.position="none") +
+    theme(
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+gg_b <- ggplot(s2) + aes(x=SID, y=fc*100) +
+    geom_tile(aes(y=as.numeric(OCEAN)*30-10, fill=OCEAN), width=1, height=30) +
+    #annotation_raster(matrix(rep(c("grey92", "white"),5), nrow=1), -Inf, Inf, 0, 100) +
+    geom_col(width=1, alpha=.5, fill="grey60") +
+    geom_point(size=.2, fill=omst_color, shape=21) +
+    #facet_wrap(~OCEAN, ncol=1, strip.position="left", scales="free_y", drop=FALSE) +
+    coord_flip() + theme(legend.position="none") +
+    scale_y_continuous("Relative Abundance") +
+    scale_color_manual(values=c(omst_color, "grey60")) +
+    #scale_fill_manual(values=ocean_colors) +
+    theme(
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.title.y=element_blank(),
+        strip.background = element_blank(),
+        strip.text = element_blank()) 
+ggarrange(gg_a, gg_b, widths=c(3,1))
+ggsave("foo.png", width=4, height=3)
+
+
+
+# log2fc or fc doesn't matter for kruskal, though - only rank-based
+# >> figure legend: https://www.nature.com/articles/s41598-017-10080-z/figures/4
+library(conover.test)
+
+# kruskal needs factorized categorials
+s2$OCEAN <- as.factor(s2$OCEAN)
+
+
+
+c0 <- conover.test(s2$log2fc, s2$OCEAN, method="bh")
+
+c1 <- c0 %>% tbl_df %>%
+    separate(comparisons, c("A","B"), " - ") %>%
+    select(A, B, P.adjusted)
+
+s2$OCEAN
+
+get_signif_coords <- function(pairs=NULL, data=NULL, data_x, y0, y_shift=.05*(y0),
+    signif_levels=c(0.001,0.01,0.05,Inf), signif_symbols=c("***", "**", "*", "NS")){
+    colnames(pairs) <- c("A", "B", "p_value")
+
+    # map factors, and convert to numbers (required for closed paths)
+    pairs %<>% mutate(
+        A=as.numeric(factor(A, levels=levels(data[[data_x]]))),
+        B=as.numeric(factor(B, levels=levels(data[[data_x]]))),
+        i=row_number()
+    )
+
+    
+    coords_lines <- apply(pairs, 1, function(r){
+        i <- r[4]
+        y1 <- y0 + (i*2-2)*y_shift
+        y2 <- y1 - y_shift/3
+        
+        data_frame(
+            x=rep(r[1:2], each=2),
+            y=c(y2, y1, y1, y2),
+            group=i)
+    }) %>% bind_rows
+
+    coords_text <- apply(pairs, 1, function(r){
+            i <- r[4]
+        y1 <- y0 + (i*2-2)*y_shift
+        y2 <- y1 + y_shift/3
+        
+        data_frame(
+            x=(r[1]+r[2])/2,
+            y=y2,
+            `p-value`=r[3],
+            label=signif_symbols[findInterval(r[3], signif_levels, left.open=TRUE)+1],
+            group=i)
+    }) %>% bind_rows
+
+
+
+    list(lines=coords_lines, text=coords_text)
+    
+}
+
+
+ggplot(s2) + aes(x=OCEAN, y=fc*100, fill=OCEAN) +
+    geom_boxplot(width=.6, outlier.shape=NA, alpha=.5) +
+   
+
+theme_set(theme_classic() + theme(
+    panel.grid.minor=element_blank(),
+    panel.grid.major=element_blank(),
+))
+
+
+cs1 <- get_signif_coords(c1, s2, "OCEAN", 80)
+
+gg_c1 <- ggplot(s2) + aes(x=OCEAN, y=fc*100, fill=OCEAN) +
+    geom_boxplot(width=.8, outlier.shape=NA, alpha=.5) +
+    geom_jitter(aes(fill=OCEAN), shape=21, width=.3, size=1.2) +
+#    geom_violin(scale="width", alpha=.3) +
+    scale_x_discrete(labels = str_replace(s2$OCEAN %>% unique, " ", "\n")) +
+    scale_y_continuous("Relative Abundance") +
+    # colors
+    #scale_fill_manual(values=ocean_colors) +
+    # significance
+    geom_path(aes(x,y, group=group, fill=NA), cs1$lines, color="black") +
+    geom_text(aes(x,y, group=group, label=label, fill=NA), cs1$text) +
+    theme(legend.position="none")
+
+gg_c1
+
+
+## log2 fold change
+s3 <-s2
+log2fc_min<- -13.5
+s3$log2fc[s3$log2fc < log2fc_min] <- log2fc_min
+s3$nd <- s3$log2fc == log2fc_min
+
+
+cs2 <- get_signif_coords(c1, s2, "OCEAN", 1, y_shift=.6)
+cs2
+
+gg_c2 <- ggplot(s3) + aes(x=OCEAN, y=log2fc, fill=OCEAN) +
+    geom_violin(scale="area", alpha=.5, draw_quantiles=.5) +
+    geom_jitter(aes(fill=OCEAN), shape=21) +
+    geom_hline(yintercept=log2fc_min, linetype=1, color="grey30", size=6, alpha=.3) +
+    geom_hline(yintercept=log2fc_min+.65, linetype=2, color="grey30", size=.5, show.legend=TRUE) +
+    # geom_text(x=3.5,y=log2fc_min, label="ND", size=2) +
+    # axis scales
+    scale_x_discrete(labels = str_replace(s3$OCEAN %>% unique, " ", "\n")) +
+    scale_y_continuous("log2(Relative Abundance)", limits=c(NA, 4)) +
+    # colors
+    #scale_fill_manual(values=ocean_colors) +
+    # significance
+    geom_path(aes(x,y, group=group, fill=NA), cs2$lines, color="black") +
+    geom_text(aes(x,y, group=group, label=label, fill=NA), cs2$text) +
+    theme(legend.position="none")
+
+
+ggarrange(gg_c1, gg_c2)
+ggsave("boxplots.png", gg, width=6, height=3)
+
+ggarrange(gg_a, gg_b, gg_c1, gg_c2,
+          ncol=4, widths=c(3,1.5,2,2), align="v")
+ggsave("allplots.png", height=3)
+#+END_SRC
+
